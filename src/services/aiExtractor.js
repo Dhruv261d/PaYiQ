@@ -1,0 +1,251 @@
+import { GoogleGenAI } from '@google/genai';
+import { CHAPTERS, TOPICS } from '../data/taxonomy';
+
+// Helper to get API key from Vite environment or localStorage override
+export function getGeminiApiKey() {
+  return localStorage.getItem('PAYIQ_GEMINI_API_KEY') || import.meta.env.VITE_GEMINI_API_KEY || '';
+}
+
+export function setGeminiApiKey(key) {
+  if (key) {
+    localStorage.setItem('PAYIQ_GEMINI_API_KEY', key.trim());
+  } else {
+    localStorage.removeItem('PAYIQ_GEMINI_API_KEY');
+  }
+}
+
+/**
+ * System Instruction for deterministic Chapter and Topic Segregation
+ */
+const SYSTEM_INSTRUCTION = `
+You are an expert AI Examination Segregator and LaTeX parser for Indian competitive exams (JEE Main, Advanced, NEET, MHT-CET, BITSAT).
+Your task is to take an entire mixed question paper (PDF or text) where questions from different chapters are randomly scattered, extract all individual questions, and SEGREGATE them strictly into their respective NCERT Chapters and Sub-Topics.
+
+CRITICAL SEGREGATION RULES:
+1. TAXONOMY MAPPING:
+   - Every question MUST be categorized into its exact Subject ('physics', 'chemistry', 'mathematics', 'biology').
+   - Map each question to the exact Chapter ID from the standard NCERT syllabus list provided.
+   - If requested, extract the specific micro-topic or concept name (e.g., 'Moment of Inertia', 'Definite Integrals King Property', 'SN2 Mechanism').
+2. FORMULA NORMALIZATION (LaTeX):
+   - Convert all variables, math symbols, formulas, and units into standard LaTeX.
+   - Use '$...$' for inline math/units ($x = 10\\text{ m/s}$).
+   - Use '$$...$$' for display equations, fractions, integrals, or chemical reaction equations.
+3. COMPLETE CONTENT EXTRACTION:
+   - Extract the problem statement, all options (A, B, C, D) for MCQs with their LaTeX formulas, the correct answer, and step-by-step solution reasoning.
+4. OUTPUT FORMAT:
+   - Return valid JSON matching the requested structure.
+`;
+
+/**
+ * Executes AI Segregation on the uploaded document
+ */
+export async function segregateExamPaper({
+  rawText,
+  imageBase64,
+  mimeType = 'image/jpeg',
+  exam = 'JEE_MAIN',
+  year = 2024,
+  paperTitle = 'Shift Paper',
+  granularity = 'chapter_topic', // 'chapter' or 'chapter_topic'
+}) {
+  const apiKey = getGeminiApiKey();
+
+  if (!apiKey) {
+    // Return intelligent realistic segregated shift dataset demonstrating the exact capability
+    return generateMockSegregatedResponse({ rawText, exam, year, paperTitle, granularity });
+  }
+
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+
+    const availableChaptersPrompt = CHAPTERS.map(c => `[${c.subjectId}] ${c.id}: ${c.name} (Class ${c.classLevel})`).join('\n');
+
+    let prompt = `You are segregating a mixed ${exam} examination paper titled "${paperTitle}" (${year}).
+Segregation Granularity: ${granularity === 'chapter_topic' ? 'Chapter AND Micro-Topic wise' : 'Chapter wise only'}.
+
+Master NCERT Chapter IDs to match against:
+${availableChaptersPrompt}
+
+Please parse all mixed questions from the provided input and group them strictly by chapter.
+For each question, provide:
+- question_text (clean LaTeX standard)
+- subject_id ('physics'|'chemistry'|'mathematics'|'biology')
+- chapter_id (matching one of the above IDs)
+- topic_name (granular concept name)
+- question_type ('MCQ'|'NUMERICAL')
+- difficulty ('EASY'|'MEDIUM'|'HARD')
+- options (array of { id: 'A'|'B'|'C'|'D', text: '$...$' })
+- correct_answer ('A'|'B'|'C'|'D' or numerical string)
+- solution_text (step-by-step LaTeX solution)
+
+Input Question Paper Content:
+${rawText || 'Refer to the attached shift image.'}`;
+
+    const contents = [{ text: prompt }];
+
+    if (imageBase64) {
+      const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+      contents.push({
+        inlineData: {
+          mimeType,
+          data: cleanBase64,
+        },
+      });
+    }
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: contents,
+      config: {
+        systemInstruction: SYSTEM_INSTRUCTION,
+        responseMimeType: 'application/json',
+      },
+    });
+
+    const outputText = response.text;
+    const parsed = JSON.parse(outputText);
+    const questionsList = Array.isArray(parsed) ? parsed : (parsed.questions || []);
+
+    return {
+      success: true,
+      paperTitle,
+      exam,
+      year,
+      granularity,
+      questions: questionsList.map((q, idx) => ({
+        id: `q-${Date.now()}-${idx + 1}`,
+        exam: q.exam || exam,
+        year: parseInt(q.year) || year,
+        subject_id: q.subject_id || 'physics',
+        chapter_id: q.chapter_id || 'phy_11_rotational',
+        topic_name: q.topic_name || 'General Concept',
+        question_type: q.question_type || (q.options ? 'MCQ' : 'NUMERICAL'),
+        difficulty: q.difficulty || 'MEDIUM',
+        question_text: q.question_text || '',
+        options: q.options || null,
+        correct_answer: q.correct_answer || 'A',
+        solution_text: q.solution_text || 'Solution generated by AI Segregator.',
+      })),
+    };
+  } catch (error) {
+    console.error('Gemini Segregator Error:', error);
+    return {
+      success: false,
+      error: error.message || 'Failed to segregate paper with Gemini Flash',
+      fallback: generateMockSegregatedResponse({ rawText, exam, year, paperTitle, granularity }),
+    };
+  }
+}
+
+/**
+ * Intelligent mock segregator demonstrating real-world mixed paper segregation
+ */
+export function generateMockSegregatedResponse({ rawText = '', exam = 'JEE_MAIN', year = 2024, paperTitle = 'Shift 1 Paper', granularity = 'chapter_topic' }) {
+  return {
+    success: true,
+    isMock: true,
+    paperTitle: paperTitle || `${exam} Shift Question Paper (${year})`,
+    exam,
+    year,
+    granularity,
+    questions: [
+      // Chapter 1: Rotational Motion (Physics)
+      {
+        id: `q-mock-${Date.now()}-1`,
+        exam,
+        year,
+        subject_id: 'physics',
+        chapter_id: 'phy_11_rotational',
+        topic_name: 'Moment of Inertia & Torque',
+        question_type: 'MCQ',
+        difficulty: 'MEDIUM',
+        question_text: 'A solid cylinder of mass $M = 2\\text{ kg}$ and radius $R = 0.2\\text{ m}$ is free to rotate about its horizontal axis. A string is wound around the cylinder and a constant force $F = 10\\text{ N}$ is applied. Find the angular acceleration $\\alpha$.',
+        options: [
+          { id: 'A', text: '$25\\text{ rad/s}^2$' },
+          { id: 'B', text: '$50\\text{ rad/s}^2$' },
+          { id: 'C', text: '$100\\text{ rad/s}^2$' },
+          { id: 'D', text: '$10\\text{ rad/s}^2$' }
+        ],
+        correct_answer: 'B',
+        solution_text: '1. Torque applied $\\tau = F \\cdot R = 10 \\times 0.2 = 2\\text{ N}\\cdot\\text{m}$.\n2. Moment of inertia $I = \\frac{1}{2} M R^2 = \\frac{1}{2} \\times 2 \\times (0.2)^2 = 0.04\\text{ kg}\\cdot\\text{m}^2$.\n3. $\\alpha = \\frac{\\tau}{I} = \\frac{2}{0.04} = 50\\text{ rad/s}^2$.\n\nCorrect Option is **(B)**.'
+      },
+      {
+        id: `q-mock-${Date.now()}-2`,
+        exam,
+        year,
+        subject_id: 'physics',
+        chapter_id: 'phy_11_rotational',
+        topic_name: 'Pure Rolling Motion',
+        question_type: 'MCQ',
+        difficulty: 'EASY',
+        question_text: 'The ratio of rotational kinetic energy to total kinetic energy for a thin uniform circular ring rolling on a flat surface without slipping is:',
+        options: [
+          { id: 'A', text: '$1 : 2$' },
+          { id: 'B', text: '$1 : 3$' },
+          { id: 'C', text: '$2 : 3$' },
+          { id: 'D', text: '$1 : 1$' }
+        ],
+        correct_answer: 'A',
+        solution_text: 'For a ring, $I = M R^2$, so $K_{\\text{rot}} = \\frac{1}{2} I \\omega^2 = \\frac{1}{2} M v^2$. Total $K = M v^2$. Ratio $= \\frac{1}{2}$.\n\nCorrect Option is **(A)**.'
+      },
+
+      // Chapter 2: Electrostatics (Physics)
+      {
+        id: `q-mock-${Date.now()}-3`,
+        exam,
+        year,
+        subject_id: 'physics',
+        chapter_id: 'phy_12_electrostatics',
+        topic_name: 'Coulomb’s Law & Equilibrium',
+        question_type: 'NUMERICAL',
+        difficulty: 'HARD',
+        question_text: 'Two point charges $+4q$ and $+q$ are placed at distance $L = 30\\text{ cm}$. A third charge $Q$ is placed between them so the system is in equilibrium. Find distance $x$ (in $\\text{cm}$) of $Q$ from $+4q$.',
+        options: null,
+        correct_answer: '20',
+        solution_text: 'For equilibrium of $Q$: $\\frac{4q}{x^2} = \\frac{q}{(L - x)^2} \\implies \\frac{2}{x} = \\frac{1}{L - x} \\implies 3x = 2L \\implies x = \\frac{2}{3}(30) = 20\\text{ cm}$.'
+      },
+
+      // Chapter 3: Chemical Bonding (Chemistry)
+      {
+        id: `q-mock-${Date.now()}-4`,
+        exam,
+        year,
+        subject_id: 'chemistry',
+        chapter_id: 'chem_11_chemical_bonding',
+        topic_name: 'Molecular Orbital Theory (MOT)',
+        question_type: 'MCQ',
+        difficulty: 'EASY',
+        question_text: 'According to Molecular Orbital Theory (MOT), which diatomic species is paramagnetic with a bond order of $2.5$?',
+        options: [
+          { id: 'A', text: '$\\text{O}_2^{2-}$' },
+          { id: 'B', text: '$\\text{N}_2^+$' },
+          { id: 'C', text: '$\\text{C}_2^{2-}$' },
+          { id: 'D', text: '$\\text{O}_2^{2+}$' }
+        ],
+        correct_answer: 'B',
+        solution_text: '$\\text{N}_2^+$ has 13 electrons: $\\text{Bond Order} = \\frac{9 - 4}{2} = 2.5$. Unpaired electron in $\\sigma 2p_z$ makes it paramagnetic.\n\nCorrect Option is **(B)**.'
+      },
+
+      // Chapter 4: Definite Integrals (Mathematics)
+      {
+        id: `q-mock-${Date.now()}-5`,
+        exam,
+        year,
+        subject_id: 'mathematics',
+        chapter_id: 'math_12_definite_integral',
+        topic_name: 'King’s Property of Definite Integrals',
+        question_type: 'MCQ',
+        difficulty: 'MEDIUM',
+        question_text: 'The value of the definite integral $I = \\int_0^{\\pi/2} \\frac{\\sin^3(x)}{\\sin^3(x) + \\cos^3(x)} \\, dx$ is equal to:',
+        options: [
+          { id: 'A', text: '$\\frac{\\pi}{2}$' },
+          { id: 'B', text: '$\\frac{\\pi}{4}$' },
+          { id: 'C', text: '$\\frac{\\pi}{8}$' },
+          { id: 'D', text: '$0$' }
+        ],
+        correct_answer: 'B',
+        solution_text: 'Applying King’s property $\\int_0^a f(x)dx = \\int_0^a f(a - x)dx$, adding the two integrals yields $2I = \\int_0^{\\pi/2} 1 \\, dx = \\frac{\\pi}{2} \\implies I = \\frac{\\pi}{4}$.\n\nCorrect Option is **(B)**.'
+      }
+    ]
+  };
+}
